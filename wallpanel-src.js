@@ -62,6 +62,8 @@ const defaultConfig = {
 	immich_memories: false,
 	immich_favorites: false,
 	immich_resolution: "preview",
+	immich_combine_portraits: false, // pair up two portrait images side by side into one landscape slide
+	immich_combine_portraits_gap: 8, // gap in pixels between the two paired portrait images
 	image_fit_landscape: "cover", // cover / contain
 	image_fit_portrait: "contain", // cover / contain
 	calculate_media_size: true,
@@ -3185,11 +3187,51 @@ function initWallpanel() {
 						filename: asset.originalFileName,
 						folderName: folderName
 					};
+					info["orientation"] = assetType === "image" ? getImmichMediaOrientation(asset) : null;
 					mediaInfo[url] = info;
 				}
 			}
 
+			function combinePortraitPairs() {
+				if (!config.immich_combine_portraits) {
+					return;
+				}
+				const portraitUrls = urls.filter(
+					(u) => mediaInfo[u] && mediaInfo[u].mediaType === "image" && mediaInfo[u].orientation === "portrait"
+				);
+				for (let i = 0; i + 1 < portraitUrls.length; i += 2) {
+					const urlA = portraitUrls[i];
+					const urlB = portraitUrls[i + 1];
+					const infoA = mediaInfo[urlA];
+					const infoB = mediaInfo[urlB];
+					const combinedUrl = `immich-combined://${encodeURIComponent(urlA)}|${encodeURIComponent(urlB)}`;
+					const idxA = urls.indexOf(urlA);
+					if (idxA >= 0) {
+						urls.splice(idxA, 1);
+					}
+					const idxB = urls.indexOf(urlB);
+					if (idxB >= 0) {
+						urls.splice(idxB, 1);
+					}
+					urls.push(combinedUrl);
+					mediaInfo[combinedUrl] = {
+						mediaType: "image",
+						orientation: "landscape",
+						combinedPair: [urlA, urlB],
+						combinedApiKeys: [infoA["immichApiKey"], infoB["immichApiKey"]],
+						immichApiKey: infoA["immichApiKey"] || infoB["immichApiKey"],
+						image: {
+							filename: `${infoA.image?.filename || ""} + ${infoB.image?.filename || ""}`,
+							folderName: infoA.image?.folderName || infoB.image?.folderName || null
+						}
+					};
+					// Preserve the originals in mediaInfo so updateMediaFromImmichCombinedPair
+					// can still look up their own API keys / fetch URLs individually.
+				}
+			}
+
 			function finalizeImageList() {
+				combinePortraitPairs();
 				if (urls.length == 0) {
 					const msg = "No matching media assets found";
 					logger.error(msg);
@@ -3602,6 +3644,9 @@ function initWallpanel() {
 		}
 
 		async updateMediaFromImmichAPI(element) {
+			if (element.mediaUrl.startsWith("immich-combined://")) {
+				return await this.updateMediaFromImmichCombinedPair(element);
+			}
 			const mediaInfo = mediaInfoCache.get(element.mediaUrl) || {};
 			const mediaType = mediaInfo["mediaType"] == "video" ? "video" : "img";
 			return await this.updateMediaFromUrl(
@@ -3611,6 +3656,105 @@ function initWallpanel() {
 				{ "x-api-key": mediaInfo["immichApiKey"] },
 				true
 			);
+		}
+
+		async updateMediaFromImmichCombinedPair(element) {
+			// element.mediaUrl has the form:
+			//   immich-combined://<encoded urlA>|<encoded urlB>
+			const mediaInfo = mediaInfoCache.get(element.mediaUrl) || {};
+			const encodedPair = element.mediaUrl.replace(/^immich-combined:\/\//, "");
+			const [encodedUrlA, encodedUrlB] = encodedPair.split("|");
+			const urlA = decodeURIComponent(encodedUrlA);
+			const urlB = decodeURIComponent(encodedUrlB);
+			const [apiKeyA, apiKeyB] = mediaInfo["combinedApiKeys"] || [];
+			const fallbackKey = mediaInfo["immichApiKey"];
+
+			const fetchAsImage = async (url, apiKey) => {
+				const response = await fetch(url, { headers: { "x-api-key": apiKey || fallbackKey } });
+				if (!response.ok) {
+					throw new Error(`Failed to load combined-pair image "${url}": ${response.status}`);
+				}
+				const blob = await response.blob();
+				const objectUrl = URL.createObjectURL(blob);
+				try {
+					const img = new Image();
+					await new Promise((resolve, reject) => {
+						img.onload = resolve;
+						img.onerror = () => reject(new Error(`Failed to decode combined-pair image "${url}"`));
+						img.src = objectUrl;
+					});
+					return img;
+				} finally {
+					// The canvas below copies the decoded pixels; the object URL itself
+					// is no longer needed once the Image has loaded.
+					URL.revokeObjectURL(objectUrl);
+				}
+			};
+
+			const [imgA, imgB] = await Promise.all([
+				fetchAsImage(urlA, apiKeyA),
+				fetchAsImage(urlB, apiKeyB)
+			]);
+
+			const gap = Number.isFinite(config.immich_combine_portraits_gap)
+				? config.immich_combine_portraits_gap
+				: 8;
+			// Combine at the shorter of the two natural heights, so neither image
+			// needs to be upscaled beyond its own resolution.
+			const targetHeight = Math.min(imgA.naturalHeight, imgB.naturalHeight);
+			const widthA = Math.round((imgA.naturalWidth * targetHeight) / imgA.naturalHeight);
+			const widthB = Math.round((imgB.naturalWidth * targetHeight) / imgB.naturalHeight);
+
+			const canvas = document.createElement("canvas");
+			canvas.width = widthA + gap + widthB;
+			canvas.height = targetHeight;
+			const ctx = canvas.getContext("2d");
+			ctx.drawImage(imgA, 0, 0, widthA, targetHeight);
+			ctx.drawImage(imgB, widthA + gap, 0, widthB, targetHeight);
+
+			const combinedBlob = await new Promise((resolve, reject) => {
+				canvas.toBlob((blob) => {
+					if (blob) {
+						resolve(blob);
+					} else {
+						reject(new Error("Failed to encode combined portrait pair to a blob"));
+					}
+				}, "image/jpeg", 0.92);
+			});
+
+			const tagName = element.tagName.toLowerCase();
+			if (tagName !== "img") {
+				// A combined pair is always a static image; replace a leftover
+				// video/iframe element from a previous slide with an <img>.
+				element = this.replaceMediaElement(element, "img");
+			}
+
+			if (typeof element.src === "string" && element.src.startsWith("blob:")) {
+				URL.revokeObjectURL(element.src);
+			}
+			const combinedObjectUrl = URL.createObjectURL(combinedBlob);
+			const loadPromise = new Promise((resolve, reject) => {
+				const onLoad = async () => {
+					element.removeEventListener("load", onLoad);
+					element.onerror = null;
+					if (typeof element.decode === "function") {
+						try {
+							await element.decode();
+						} catch (error) {
+							logger.debug("Failed to pre-decode combined portrait pair image:", error);
+						}
+					}
+					resolve();
+				};
+				element.addEventListener("load", onLoad);
+				element.onerror = () => {
+					element.removeEventListener("load", onLoad);
+					reject(new Error("Failed to load combined portrait pair image element"));
+				};
+			});
+			element.src = combinedObjectUrl;
+			await loadPromise;
+			return element;
 		}
 
 		async updateMediaFromMediaEntity(element) {
