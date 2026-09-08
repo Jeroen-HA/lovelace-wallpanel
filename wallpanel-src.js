@@ -3196,12 +3196,17 @@ function initWallpanel() {
 				if (!config.immich_combine_portraits) {
 					return;
 				}
-				const portraitUrls = urls.filter(
+				let portraitUrls = urls.filter(
 					(u) => mediaInfo[u] && mediaInfo[u].mediaType === "image" && mediaInfo[u].orientation === "portrait"
 				);
-				for (let i = 0; i + 1 < portraitUrls.length; i += 2) {
-					const urlA = portraitUrls[i];
-					const urlB = portraitUrls[i + 1];
+				if (portraitUrls.length < 2) {
+					return;
+				}
+				// Shuffle so which two portraits land in a pair varies between
+				// media-list refreshes, instead of always following list order.
+				portraitUrls = shuffleArray(portraitUrls);
+
+				function makeCombinedPair(urlA, urlB) {
 					const infoA = mediaInfo[urlA];
 					const infoB = mediaInfo[urlB];
 					const combinedUrl = `immich-combined://${encodeURIComponent(urlA)}|${encodeURIComponent(urlB)}`;
@@ -3227,6 +3232,21 @@ function initWallpanel() {
 					};
 					// Preserve the originals in mediaInfo so updateMediaFromImmichCombinedPair
 					// can still look up their own API keys / fetch URLs individually.
+				}
+
+				for (let i = 0; i + 1 < portraitUrls.length; i += 2) {
+					makeCombinedPair(portraitUrls[i], portraitUrls[i + 1]);
+				}
+
+				if (portraitUrls.length % 2 !== 0) {
+					// Odd one out: rather than showing it alone, pair it with a random
+					// other portrait so every portrait always appears combined. That
+					// partner ends up shown twice (once in its own pair, once here),
+					// which is a fair trade-off for "never show an unpaired portrait".
+					const leftover = portraitUrls[portraitUrls.length - 1];
+					const otherPortraits = portraitUrls.filter((u) => u !== leftover);
+					const partner = otherPortraits[Math.floor(Math.random() * otherPortraits.length)];
+					makeCombinedPair(leftover, partner);
 				}
 			}
 
