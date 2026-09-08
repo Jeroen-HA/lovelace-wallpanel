@@ -108,6 +108,14 @@ const defaultConfig = {
 	camera_motion_detection_motion_stop_delay: 2.0,
 	theme: "",
 	custom_css: "",
+	night_mode_entity: "", // entity_id; night mode is active whenever this entity's state is "on"
+	night_mode_style: "dim", // "dim" (darken/desaturate photos) or "clock" (black screen, clock only, photos paused)
+	night_mode_brightness: 0.35, // used when night_mode_style == "dim"
+	night_mode_saturation: 0.8, // used when night_mode_style == "dim"
+	night_mode_clock_font_size: "4em",
+	night_mode_clock_color: "white",
+	night_mode_clock_24h: true,
+	night_mode_clock_show_seconds: false,
 	style: {},
 	badges: [],
 	cards: [],
@@ -1367,6 +1375,8 @@ function initWallpanel() {
 			this.__cards = [];
 			this.__badges = [];
 			this.__views = [];
+			this._nightModeActive = false;
+			this._nightModeOverlay = null;
 
 			elHass.provideHass(this);
 			this.timerInterval = setInterval(this.timer.bind(this), 1000);
@@ -1390,6 +1400,7 @@ function initWallpanel() {
 			if (!profileUpdated && changed) {
 				updateConfig();
 			}
+			this.updateNightMode();
 
 			if (!isActive()) {
 				return;
@@ -1483,6 +1494,98 @@ function initWallpanel() {
 				);
 		}
 
+		updateNightMode() {
+			const entityId = config.night_mode_entity;
+			const active = Boolean(
+				entityId && this.__hass && this.__hass.states[entityId] && this.__hass.states[entityId].state === "on"
+			);
+			if (active === this._nightModeActive) {
+				// Still refresh the clock text/style in case night_mode_style or
+				// formatting-related config changed while already active.
+				if (active) {
+					this.applyNightModeState();
+				}
+				return;
+			}
+			this._nightModeActive = active;
+			logger.debug(`Night mode ${active ? "activated" : "deactivated"} (entity: ${entityId})`);
+			this.applyNightModeState();
+		}
+
+		ensureNightModeOverlay() {
+			if (this._nightModeOverlay) {
+				return this._nightModeOverlay;
+			}
+			const overlay = document.createElement("div");
+			overlay.id = "wallpanel-night-mode-clock-overlay";
+			overlay.style.position = "absolute";
+			overlay.style.top = "0";
+			overlay.style.left = "0";
+			overlay.style.right = "0";
+			overlay.style.bottom = "0";
+			overlay.style.display = "none";
+			overlay.style.alignItems = "center";
+			overlay.style.justifyContent = "center";
+			overlay.style.backgroundColor = "black";
+			overlay.style.zIndex = "500";
+			overlay.style.pointerEvents = "none";
+			const clockText = document.createElement("div");
+			clockText.id = "wallpanel-night-mode-clock-text";
+			clockText.style.fontFamily = "sans-serif";
+			overlay.appendChild(clockText);
+			this.screensaverContainer.appendChild(overlay);
+			this._nightModeOverlay = overlay;
+			return overlay;
+		}
+
+		updateNightModeClockText() {
+			if (!this._nightModeOverlay) {
+				return;
+			}
+			const clockText = this._nightModeOverlay.querySelector("#wallpanel-night-mode-clock-text");
+			if (!clockText) {
+				return;
+			}
+			clockText.style.fontSize = config.night_mode_clock_font_size;
+			clockText.style.color = config.night_mode_clock_color;
+			const now = new Date();
+			let hours = now.getHours();
+			if (!config.night_mode_clock_24h) {
+				hours = hours % 12 || 12;
+			}
+			const pad = (n) => String(n).padStart(2, "0");
+			let text = `${pad(hours)}:${pad(now.getMinutes())}`;
+			if (config.night_mode_clock_show_seconds) {
+				text += `:${pad(now.getSeconds())}`;
+			}
+			clockText.textContent = text;
+		}
+
+		applyNightModeState() {
+			const container = this.screensaverContainer;
+			if (!container) {
+				return;
+			}
+			if (!this._nightModeActive) {
+				container.style.filter = "";
+				if (this._nightModeOverlay) {
+					this._nightModeOverlay.style.display = "none";
+				}
+				return;
+			}
+			if (config.night_mode_style === "clock") {
+				container.style.filter = "";
+				const overlay = this.ensureNightModeOverlay();
+				overlay.style.display = "flex";
+				this.updateNightModeClockText();
+			} else {
+				if (this._nightModeOverlay) {
+					this._nightModeOverlay.style.display = "none";
+				}
+				container.style.filter = `brightness(${config.night_mode_brightness}) saturate(${config.night_mode_saturation})`;
+			}
+		}
+
 		updateProfile() {
 			const profile_entity = config.profile_entity;
 			if (profile_entity && this.__hass.states[profile_entity]) {
@@ -1500,6 +1603,9 @@ function initWallpanel() {
 		timer() {
 			if (!config.enabled || !activePanel) {
 				return;
+			}
+			if (this._nightModeActive && config.night_mode_style === "clock") {
+				this.updateNightModeClockText();
 			}
 			if (this.screensaverRunning()) {
 				if (config.disable_screensaver_on_browser_mod_popup && getActiveBrowserModPopup()) {
