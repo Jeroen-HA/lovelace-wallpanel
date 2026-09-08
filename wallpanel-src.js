@@ -3197,7 +3197,7 @@ function initWallpanel() {
 
 			async function fetchAssetInfo(assets, apiKey) {
 				const fetchTags = config.immich_exclude_tag_names && config.immich_exclude_tag_names.length;
-				const needDimensions = !!exclude_media_orientation;
+				const needDimensions = !!exclude_media_orientation || !!config.immich_combine_portraits;
 				const assetInfoConcurrency = 10;
 				for (let offset = 0; offset < assets.length; offset += assetInfoConcurrency) {
 					const assetBatch = assets.slice(offset, offset + assetInfoConcurrency);
