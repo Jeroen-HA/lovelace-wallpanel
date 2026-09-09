@@ -243,6 +243,12 @@ function isObject(item) {
 function stringify(obj) {
 	const processedObjects = [];
 	const json = JSON.stringify(obj, function (key, value) {
+		if (value instanceof Error) {
+			// Error.message/.stack/.name are non-enumerable, so plain
+			// JSON.stringify silently drops them, turning any logged error
+			// into a useless "{}". Serialize the fields that actually matter.
+			return { name: value.name, message: value.message, stack: value.stack };
+		}
 		if (typeof value === "object" && value !== null) {
 			if (processedObjects.indexOf(value) !== -1) {
 				// Circular reference found, discard key
@@ -3819,7 +3825,8 @@ function initWallpanel() {
 				// Set your WiFi connection to "not metered".
 				element.updateMediaError = true;
 				element.style.visibility = "visible";
-				logger.error(`Failed to update media from ${element.mediaUrl}:`, error);
+				const onlineStatus = typeof navigator !== "undefined" ? `, navigator.onLine=${navigator.onLine}` : "";
+				logger.error(`Failed to update media from ${element.mediaUrl}${onlineStatus}:`, error);
 			} finally {
 				this.updatingMedia = false;
 			}
